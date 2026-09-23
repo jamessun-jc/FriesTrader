@@ -3,6 +3,27 @@
 ![License](https://img.shields.io/github/license/YizhiSong/FriesTrader)
 ![GitHub stars](https://img.shields.io/github/stars/YizhiSong/FriesTrader)
 
+## About this fork — Alpaca deployment
+
+This fork maintains and operates the **Alpaca-MCP lineage** of FriesTrader as a
+live-gated deployment (currently in dry-run burn-in before live capital).
+Upstream has since migrated to Robinhood's Agentic Trading MCP; this fork
+deliberately stays on [Alpaca's brokerage API](https://alpaca.markets) via the
+[alpaca-mcp-server](https://github.com/alpacahq/alpaca-mcp-server) and diverges
+from upstream in three ways:
+
+- **Risk governance** — customized mechanical risk rules: explicit capital base,
+  a 10-cycle dry-run gate before any live order, hard limits the model can never
+  override.
+- **Screening pipeline** — tuned watchlist plus a most-active supplementary scan
+  sized for a small, auditable candidate set.
+- **P&L denomination** — loss-limit percentages computed against the deposit
+  base rather than the broker's rate-of-return metric.
+
+All credit for the original system to [Yizhi Song](https://github.com/YizhiSong/FriesTrader).
+Maintained by [James Sun](https://github.com/jamessun-jc).
+
+
 An AI trading agent built to run cheap and fully on its own, trading real
 orders on [Alpaca](https://alpaca.markets) using its
 [MCP server](https://github.com/alpacahq/alpaca-mcp-server).
