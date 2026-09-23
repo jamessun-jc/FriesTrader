@@ -5,7 +5,7 @@
 
 Per risk_rules.json/PHASE_B_TASK.md spec: daily_pnl_pct and weekly_pnl_pct
 are always denominated against starting_capital_usd, never against
-get_realized_pnl's own total_rate_of_return (which is denominated against
+the broker's own rate-of-return metric (which is denominated against
 capital in the closed trades, a different and smaller base).
 """
 import argparse
@@ -16,9 +16,9 @@ import sys
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--daily-realized-usd", type=float, required=True,
-                    help="get_realized_pnl span=day total_returns (0 if no trades today)")
+                    help="Daily realized P&L in USD from account activities (0 if no trades today)")
     p.add_argument("--weekly-realized-usd", type=float, required=True,
-                    help="get_realized_pnl span=week total_returns (0 if no trades this week)")
+                    help="Weekly realized P&L in USD from account activities (0 if no trades this week)")
     p.add_argument("--starting-capital-usd", type=float, required=True,
                     help="risk_rules.json starting_capital_usd")
     p.add_argument("--daily-limit-pct", type=float, required=True,
