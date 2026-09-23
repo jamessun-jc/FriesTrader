@@ -4,8 +4,8 @@
 ![GitHub stars](https://img.shields.io/github/stars/YizhiSong/FriesTrader)
 
 An AI trading agent built to run cheap and fully on its own, trading real
-orders on [Robinhood](https://robinhood.com) using its
-[Agentic Trading MCP server](https://robinhood.com/us/en/agentic-trading/).
+orders on [Alpaca](https://alpaca.markets) using its
+[MCP server](https://github.com/alpacahq/alpaca-mcp-server).
 Once set up, it's able to run unattended on its own schedule every
 weekday, no manual triggering needed, and the actual safety mechanism is
 mechanical, auditable risk rules, not the model's judgment. Two short
@@ -48,9 +48,8 @@ nervous. Here's what actually stands between a thesis and an order:
 
 ## Requirements
 
-- A [Robinhood](https://robinhood.com) account with
-  [Agentic Trading](https://robinhood.com/us/en/agentic-trading/) enabled,
-  connected via Robinhood's own MCP server.
+- An [Alpaca](https://alpaca.markets) brokerage account with API keys,
+  connected via the Alpaca MCP server.
 - [Claude Code](https://claude.com/claude-code), on a Pro subscription or
   higher.
 - A GitHub account, to host your own copy of this repo — only needed
@@ -66,13 +65,13 @@ overnight price.
 
 ```mermaid
 graph TD
-    RH[Robinhood MCP] -- watchlist + scan / quotes / historicals --> A[Phase A: Screen & Thesis]
+    ALP[Alpaca MCP] -- watchlist + scan / quotes / bars --> A[Phase A: Screen & Thesis]
     A -- thesis per candidate --> P[pending_proposals.jsonl]
     P --> B[Phase B: Re-verify & Risk Enforcement]
     RR[risk_rules.json] -- thresholds --> S[scripts/*.py deterministic risk math]
     S -- JSON results, read verbatim --> B
-    RH -- fresh open price / positions --> B
-    B -- dry_run or gated live order --> RH
+    ALP -- fresh open price / positions --> B
+    B -- dry_run or gated live order --> ALP
     B -- every decision logged --> L[trade_log.jsonl]
     L -- plain-English recap --> REC[trade_log_recent.md]
 ```
@@ -191,28 +190,24 @@ in Example output.
 See "Keeping your copy updated" below for pulling in future
 improvements.
 
-1. Robinhood's [Agentic Trading](https://robinhood.com/us/en/agentic-trading/)
-   requires a separate, dedicated account — distinct from your regular
-   investing account, and restricted to only the funds you put in it. See
-   that page to open one and connect its MCP server to Claude Code (or to
-   your routine's MCP connections). Nothing below works without this:
-   every tool call in `PHASE_A_TASK.md`/`PHASE_B_TASK.md` (quotes,
-   positions, orders, etc.) goes through it.
-2. Fill in `account_number` in `risk_rules.json` with your own Robinhood
-   account number, set `starting_capital_usd` to your real starting
+1. Create an [Alpaca](https://alpaca.markets) brokerage account and
+   generate API keys (paper trading keys for testing, live keys for real
+   money). Connect the Alpaca MCP server to Claude Code (or to your
+   routine's MCP connections) with your API key and secret. Nothing below
+   works without this: every tool call in
+   `PHASE_A_TASK.md`/`PHASE_B_TASK.md` (quotes, positions, orders, etc.)
+   goes through it.
+2. Set `starting_capital_usd` in `risk_rules.json` to your real starting
    balance, set `universe.watchlist_name` to a watchlist you've already
-   created and populated in your Robinhood account, and review every
-   other threshold — the defaults here are illustrative, not a
-   recommendation.
-3. Create a scan via the Robinhood MCP's `create_scan` tool — whatever
-   screening conditions you like — then paste its ID into
-   `universe.supplementary_scan_id`. Phase A calls this scan every run
-   to surface movers outside your watchlist — left as the placeholder,
-   that call fails every cycle.
-4. Fill in `wash_sale_avoidance.linked_accounts` with every Robinhood
-   account number you personally control, not just this one — if this is
-   genuinely the only account you trade in, a single-entry list (just
-   this account's number) is enough. Leave `enabled: true` unless you
+   created in your Alpaca account, and review every other threshold —
+   the defaults here are illustrative, not a recommendation.
+3. Choose a `supplementary_scan_source` in `risk_rules.json` —
+   `"most_active"` (by volume) or `"market_movers"` (top gainers/losers).
+   Phase A calls this every run to surface movers outside your watchlist.
+4. If you trade the same symbols in other brokerage accounts, list those
+   account identifiers in `wash_sale_avoidance.linked_account_ids` for
+   cross-account wash-sale awareness. Leave the list empty if this is
+   your only trading account. Leave `enabled: true` unless you
    specifically want buys never blocked on wash-sale grounds.
 5. Keep `execution.mode` set to `"dry_run"`. Leave it there for at least
    the number of cycles set in `dry_run_min_cycles_before_live` — don't
@@ -277,7 +272,7 @@ deployment uses; copy one in and swap in your own account number.
 #### Phase A prompt
 
 ```
-You are running the DAILY automated Phase A step (screening & thesis only) for a small real personal trading account on Robinhood (account_number: <your Robinhood account_number>). This repo has already been cloned into your working directory. PHASE_A_TASK.md in this checkout is the full source-of-truth spec for what to do (Steps 1-3) — read and follow it exactly.
+You are running the DAILY automated Phase A step (screening & thesis only) for a small real personal trading account on Alpaca. This repo has already been cloned into your working directory. PHASE_A_TASK.md in this checkout is the full source-of-truth spec for what to do (Steps 1-3) — read and follow it exactly.
 
 First, determine today's REAL date, day-of-week, and time-of-day in America/Chicago (Central) via Bash — do not guess or infer these:
 TZ='America/Chicago' date +'%Y-%m-%d'
@@ -289,7 +284,7 @@ Read risk_rules.json fresh from this checkout every run — never assume prior v
 
 Follow PHASE_A_TASK.md's Steps 1-3 exactly, including the screened/thesis/summary line shapes and the End-of-run summary section. Overwrite pending_proposals.jsonl in this checkout with this run's results (do not append to prior contents). Do NOT touch trade_log.jsonl.
 
-Hard stop: place_equity_order, review_equity_order, place_option_order, review_option_order, cancel_equity_order, and cancel_option_order should not be available to you in this session (exclude them at the connector level if your MCP setup allows it) — do not attempt them regardless, and do not check or reference execution.mode.
+Hard stop: place_stock_order, place_option_order, cancel_order_by_id, and cancel_all_orders should not be available to you in this session (exclude them at the connector level if your MCP setup allows it) — do not attempt them regardless, and do not check or reference execution.mode.
 
 When pending_proposals.jsonl is fully written, commit and push it back to this repo's main branch:
 git add pending_proposals.jsonl
@@ -303,7 +298,7 @@ End with a concise summary of what you screened/filtered/proposed, and confirm t
 #### Phase B prompt
 
 ```
-You are running the DAILY automated Phase B step (re-verify, risk enforcement, order review/execution, logging) for a small real personal trading account on Robinhood (account_number: <your Robinhood account_number>). This repo has already been cloned into your working directory. PHASE_B_TASK.md in this checkout is the full source-of-truth spec for what to do (Steps 4-9) — read and follow it exactly.
+You are running the DAILY automated Phase B step (re-verify, risk enforcement, order review/execution, logging) for a small real personal trading account on Alpaca. This repo has already been cloned into your working directory. PHASE_B_TASK.md in this checkout is the full source-of-truth spec for what to do (Steps 4-9) — read and follow it exactly.
 
 First, determine today's REAL date, day-of-week, and time-of-day in America/Chicago (Central) via Bash — do not guess or infer these, and do not compute day-of-week yourself from the date string:
 TZ='America/Chicago' date +'%Y-%m-%d'

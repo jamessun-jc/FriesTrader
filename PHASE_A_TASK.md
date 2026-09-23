@@ -7,22 +7,24 @@ Automated subset of this pipeline (see `README.md`), run every weekday
 
 Performs **ONLY Steps 1–3**. **NEVER** Step 4 (re-verify), 5 (risk
 enforcement), 6 (dry run/order review), or 7 (`trade_log.jsonl`) — those
-belong to Phase B. Order tools (`review_equity_order`,
-`place_equity_order`, cancel) are hard-blocked at the connector level; do
+belong to Phase B. Order tools (`place_stock_order`,
+`cancel_order_by_id`) are hard-blocked at the connector level; do
 not attempt them anyway.
 
 ## Step 1 — Build the watchlist
 
-Pull symbols from the Robinhood watchlist named `universe.watchlist_name`
+Pull symbols from the Alpaca watchlist named `universe.watchlist_name`
 in `risk_rules.json` (read fresh each run — don't assume prior values or
-hardcode the name). Call `get_watchlists` to find its `list_id` by
-matching `display_name`, then `get_watchlist_items` on that `list_id` —
+hardcode the name). Call `get_watchlists` to find its `id` by
+matching `name`, then `get_watchlist_by_id` on that `id` —
 ignore all other watchlists.
 
-**Supplementary market scan** (additive, not a replacement): call
-`run_scan` with `universe.supplementary_scan_id` — a saved Robinhood
-scanner (relative volume and market cap criteria, see
-`universe.supplementary_scan_note`) that surfaces genuinely notable
+**Supplementary market scan** (additive, not a replacement): if
+`universe.supplementary_scan_source` is `"most_active"`, call
+`get_most_active_stocks` with `by: "volume"` and
+`top: universe.supplementary_scan_top`; if `"market_movers"`, call
+`get_market_movers` with `market_type: "stocks"` and
+`top: universe.supplementary_scan_top`. These surface genuinely notable
 movers from outside your watchlist, so candidate selection isn't limited
 to names you've personally added. Drop any scan result that's already on
 the watchlist (it's already a watchlist candidate, not a second one) or
@@ -35,26 +37,35 @@ from and additive to** `watchlist_max_candidates` below — scan results
 never compete with watchlist candidates for the same slots.
 
 Dedupe the combined (watchlist + capped scan) list, filter via
-`get_equity_fundamentals` against `risk_rules.json`'s current `universe`
-block, and cap the **watchlist-sourced, non-held** portion at
+`get_asset` (per symbol, for basic asset info) against
+`risk_rules.json`'s current `universe` block, and cap the
+**watchlist-sourced, non-held** portion at
 `universe.watchlist_max_candidates` — the scan's own separate cap above
 already bounds its own contribution, so this cap only ever applies to
 watchlist candidates.
 
-Pull current prices for the capped candidate list via `get_equity_quotes`
-(batched into one call), fresh every run. Use `last_trade_price` as
-`current_price` in Steps 2–3.
+Pull current prices for the capped candidate list via
+`get_stock_latest_trade` (batched — pass all symbols comma-separated),
+fresh every run. Use the latest trade `price` as `current_price` in
+Steps 2–3.
 
-Pull price history per candidate via `get_equity_historicals`
-(`interval="day"`, spanning the last ~300 calendar days — enough to
+Pull price history per candidate via `get_stock_bars`
+(`timeframe: "1Day"`, `adjustment: "split"`, `days: 300` — enough to
 cover a `trend_filter_lookback_trading_days`-bar moving average plus
 buffer for weekends/holidays), fresh every run. This same series is
-reused in Step 2 for the 60-day price-move signal and in the trend-filter
-check just below — no second historicals call needed for either.
+reused in Step 2 for the 60-day price-move signal, in the trend-filter
+check just below, and to compute 52-week high/low and average volume
+(since Alpaca does not provide a fundamentals endpoint) — no second
+bars call needed for any of these.
 
 `universe.max_market_cap_usd` is a ceiling, not just a floor — exclude if
 market cap exceeds it, regardless of how strong the candidate otherwise
-looks. Log as
+looks. Alpaca does not provide market cap directly; estimate it as
+`current_price * shares_outstanding` if available from a web search, or
+skip this specific filter for candidates where market cap cannot be
+determined and log
+`"market cap unknown — universe.max_market_cap_usd filter skipped"`.
+When determinable, log as
 `"market cap $<X> exceeds universe.max_market_cap_usd ($<threshold>) — excluded per universe filters"`.
 
 `universe.penny_stock_filter_enabled` is a mechanical exclusion, not a
@@ -65,12 +76,12 @@ is otherwise trading. Log the reason as
 
 `universe.leveraged_etf_filter_enabled`/`universe.inverse_etf_filter_enabled`
 are also mechanical, each independently toggleable: when true, exclude if
-Step 1's `get_equity_fundamentals` `description` field contains
-"leveraged" or "inverse" respectively (case-insensitive substring match)
-— fund providers state this directly (e.g. TQQQ: "provides 3x leveraged
-exposure...", SQQQ: "provides (-3x) inverse exposure..."), no judgment
-about current risk needed. Log the reason as
-`"leveraged/inverse ETF (description: \"<matched phrase>\") — excluded per universe.<leveraged_etf_filter_enabled|inverse_etf_filter_enabled>"`.
+Step 1's `get_asset` `name` field contains "leveraged", "ultra", or
+"inverse" respectively (case-insensitive substring match) — fund
+providers state this directly in the asset name (e.g. TQQQ: "ProShares
+UltraPro QQQ", SQQQ: "ProShares UltraShort QQQ"), no judgment about
+current risk needed. Log the reason as
+`"leveraged/inverse ETF (name: \"<matched phrase>\") — excluded per universe.<leveraged_etf_filter_enabled|inverse_etf_filter_enabled>"`.
 
 `universe.trend_filter_lookback_trading_days` is a mechanical downtrend
 exclusion, active only when `universe.trend_filter_enabled` is true:
@@ -85,7 +96,7 @@ candidate rather than excluding or guessing, and log
 `"trend filter skipped — fewer than <trend_filter_lookback_trading_days> daily bars available"`.
 
 **Always ensure every held position is in the final list**
-(`get_equity_positions`, account_number from `risk_rules.json`) — if one
+(`get_all_positions`) — if one
 already made it through on its own (e.g. it's also on the watchlist),
 leave it as-is, don't add a duplicate. `watchlist_max_candidates` is a
 cap on **non-held** candidates only: exclude held positions from that
@@ -102,8 +113,8 @@ Phase B's job. See Hard stop below.)
 
 ## Step 2 — Gather signals
 
-Use the ~210-day price history per candidate already pulled in Step 1
-(`get_equity_historicals`) — no second pull needed; take its most recent
+Use the ~300-day price history per candidate already pulled in Step 1
+(`get_stock_bars`) — no second pull needed; take its most recent
 60 calendar days' worth of bars for the signal below. Never reuse
 `close_60d_ago`, `latest_close`, or any other historicals-derived value
 from a prior run's `pending_proposals.jsonl` or `trade_log.jsonl`, even
@@ -115,18 +126,22 @@ needed):
 
 1. **60-day price move**: `abs(latest_close - close_60d_ago) / close_60d_ago >= signal_thresholds.price_move_60d_pct`.
    **"60 days" = 60 *calendar* days, not trading bars.** Get
-   `close_60d_ago` as the earliest bar's `close_price` when
-   `get_equity_historicals`'s `start_time` = today minus 60 calendar days
+   `close_60d_ago` as the earliest bar's `close` when filtering
+   `get_stock_bars` results to `start` = today minus 60 calendar days
    — don't pull a longer range and count back 60 bars (that drifts to
    ~85-90 calendar days and overstates the move). If less than 60 days of
    history exists (e.g. recent IPO), compute over the available window
    and note it rather than skipping.
 2. **Volume spike**: `latest_volume / average_volume_30_days >= signal_thresholds.volume_spike_multiple`
-   (both from Step 1's `get_equity_fundamentals` call).
+   (`latest_volume` from the most recent bar in Step 1's `get_stock_bars`
+   pull; `average_volume_30_days` = mean of `volume` across the most
+   recent 30 calendar days of bars from the same pull).
 3. **Near a 52-week extreme**: `(high_52_weeks - current_price) / high_52_weeks <= signal_thresholds.pct_from_52wk_extreme`
    **or** `(current_price - low_52_weeks) / low_52_weeks <= signal_thresholds.pct_from_52wk_extreme`
-   (`high_52_weeks`/`low_52_weeks` from Step 1's `get_equity_fundamentals`
-   call, `current_price` from Step 1's `get_equity_quotes` call).
+   (`high_52_weeks` = max of `high` across 252 trading days of bars from
+   Step 1's `get_stock_bars` pull; `low_52_weeks` = min of `low` across
+   the same bars; `current_price` from Step 1's `get_stock_latest_trade`
+   call).
 
 **Log the raw inputs behind every ratio, not just the ratio** (see
 `signal_check` format below) — otherwise it can't be sanity-checked
@@ -263,8 +278,9 @@ primary within-tier tie-break, ahead of `pct_below_52wk_high`.
 
 **Include `pct_below_52wk_high`** for every `direction: "long"` candidate:
 `(high_52_weeks - current_price) / high_52_weeks` (e.g. `0.15`).
-`high_52_weeks` from Step 1's `get_equity_fundamentals` call,
-`current_price` from Step 1's `get_equity_quotes` call. Used by
+`high_52_weeks` computed from Step 1's `get_stock_bars` pull (max of
+`high` across 252 trading days), `current_price` from Step 1's
+`get_stock_latest_trade` call. Used by
 Phase B (Step 7) as the secondary within-tier tie-break, after
 `risk_flags` — a disclosed "room in the setup" proxy, not a fair-value
 calc. Omit for `avoid`/`exit_existing`.
@@ -336,7 +352,7 @@ thesis lines.
 
 ## Hard stop
 
-Do not call `review_equity_order`, `place_equity_order`, or any
-cancel/order tool, or check `execution.mode`. `get_equity_positions` is
+Do not call `place_stock_order`, `cancel_order_by_id`, or any
+order tool, or check `execution.mode`. `get_all_positions` is
 for Step 1's candidate list only — no stop-loss/drawdown computation
 here; all risk enforcement is Phase B's job.

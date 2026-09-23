@@ -16,8 +16,7 @@ Do not add, remove, or loosen any gate condition on your own judgment.
 
 ## Step 0 — Load state (do this first, every run)
 
-1. Read `risk_rules.json` **fresh** — never cache across runs. Use its
-   `account_number`, not a hardcoded value.
+1. Read `risk_rules.json` **fresh** — never cache across runs.
 2. Determine today's day of week mechanically (e.g.
    `TZ='America/Chicago' date +'%A'`) — don't infer it from the date
    string. Needed for Step 7's weekend-gap check.
@@ -44,7 +43,7 @@ Do not add, remove, or loosen any gate condition on your own judgment.
 
 ## Step 4 — Classify candidates
 
-Pull `get_equity_positions` — this snapshot, taken before any of this
+Pull `get_all_positions` — this snapshot, taken before any of this
 cycle's sells execute, is also what Step 5's stop-loss/take-profit
 checks use.
 
@@ -73,23 +72,24 @@ group) would no longer find it there.
 Gather inputs, then let the script decide — do not hand-compute the
 reference price, drawdown, stdev, or clamp. For each open position
 (the snapshot pulled in Step 4):
-- Pull a fresh `get_equity_quotes` price.
+- Pull a fresh `get_stock_latest_quote` price (use `ask_price` for
+  current price).
 - Check `trade_log.jsonl` for whether any `take_profit` tier has fired
   for this position's current holding period (same "since quantity
   last reached zero" scope as the take-profit check below).
-- If a tier has fired, pull daily `high_price` bars via
-  `get_equity_historicals` (interval=day, split-adjusted) from the
+- If a tier has fired, pull daily `high` bars via
+  `get_stock_bars` (`timeframe: "1Day"`, `adjustment: "split"`) from the
   holding period's entry date (the buy that started it from zero)
   through yesterday, for `--daily-highs`.
 - If `risk_rules.json`'s `stop_loss.mode` is `"volatility_scaled"` and
   the position is not currently showing a gain on average cost, pull
   the last `stop_loss.volatility_lookback_trading_days` trading days
-  of daily closes via `get_equity_historicals` (interval=day,
-  split-adjusted; request ~30 calendar days back to cover
-  weekends/holidays, drop any `interpolated: true` bars), oldest
-  first through yesterday, for `--daily-closes`. Skip this pull on a
-  gain — the script itself also skips the computation in that case,
-  since a non-positive drawdown can never meet a positive `stop_pct`.
+  of daily closes via `get_stock_bars` (`timeframe: "1Day"`,
+  `adjustment: "split"`, `days: 30` to cover weekends/holidays),
+  oldest first through yesterday, for `--daily-closes`. Skip this
+  pull on a gain — the script itself also skips the computation in
+  that case, since a non-positive drawdown can never meet a positive
+  `stop_pct`.
 
 Run:
 `python3 scripts/stop_loss.py --average-cost <avg cost> --current-price <fresh quote> --mode <stop_loss.mode> --hard-stop-pct <stop_loss.hard_stop_pct> --volatility-multiplier <stop_loss.volatility_stdev_multiplier> --min-stop-pct <stop_loss.min_stop_pct> --max-stop-pct <stop_loss.max_stop_pct> --fallback-stop-pct <stop_loss.fallback_stop_pct> --min-bars 10 [--daily-closes <comma-separated closes>] [--take-profit-tier-fired --daily-highs <comma-separated highs> --trailing-high-since <entry date>]`
@@ -215,38 +215,34 @@ sell must actually clear before its freed cash/slot can be counted
 toward a same-cycle buy, and before today's realized P&L (loss-limit
 check, further down) can see it.
 
-1. **Always** call `review_equity_order` first — a preview, never places
-   anything.
-2. If it surfaces a blocking alert, do not proceed to placement
-   regardless of mode; log the alert verbatim and treat as rejected.
-3. Otherwise, branch on `execution.mode` (fresh from Step 0) and the
+1. Validate the order parameters (symbol, side, quantity/notional,
+   type, time_in_force) are well-formed before proceeding.
+2. Branch on `execution.mode` (fresh from Step 0) and the
    dry-run cycle count:
 
    **Live-order gate — ALL must be true:**
    - `execution.mode == "live"`
    - dry-run cycle count `>= execution.dry_run_min_cycles_before_live`
-   - `review_equity_order` for this order returned no blocking alert
 
-   - **Gate open**: call `place_equity_order` with the reviewed
+   - **Gate open**: call `place_stock_order` with the validated
      parameters. Then confirm the real fill before logging — the
-     `place_equity_order` response alone is not enough (it typically
-     returns `order_state: "unconfirmed"`, not the actual outcome):
-     1. Call `get_equity_orders` with this `order_id`.
-     2. If `state` is terminal (`filled`, `partially_filled`,
-        `cancelled`, `rejected`, `failed`, `voided`), use it.
+     initial response may not reflect the final outcome:
+     1. Call `get_order_by_id` with this `order_id`.
+     2. If `status` is terminal (`filled`, `partially_filled`,
+        `canceled`, `rejected`, `expired`), use it.
      3. Otherwise wait ~15 seconds and check once more; use whatever
-        `state` comes back, terminal or not — never poll more than
+        `status` comes back, terminal or not — never poll more than
         twice or block the cycle waiting for a fill.
      Log `"stage": "order", "mode": "live", "placed": true, "order_id":
-     "<id>", "order_state": "<confirmed state from get_equity_orders>",
-     "fill_price": <average_price if filled/partially_filled, else
-     null>, "fill_quantity": <cumulative_quantity if filled/partially_filled,
+     "<id>", "order_status": "<confirmed status from get_order_by_id>",
+     "fill_price": <filled_avg_price if filled/partially_filled, else
+     null>, "fill_quantity": <filled_qty if filled/partially_filled,
      else null>` in addition to the pre-trade `quote_bid`/`quantity`
      estimate already logged (not in place of it) — the log should show
      both the estimate and the confirmed real outcome.
    - `execution.mode == "dry_run"`: log
      `"stage": "order", "mode": "dry_run", "would_execute": true"` and stop.
-     **Never call `place_equity_order` here.**
+     **Never call `place_stock_order` here.**
    - `execution.mode == "live"` but cycle count still under threshold: do
      **not** place. Log
      `"stage": "order", "mode": "live_blocked_insufficient_cycles", "would_execute": true, "placed": false"`
@@ -262,7 +258,7 @@ conviction-trim fires, or an
 `exit_existing` sell is processed, and that specific sale realizes a
 loss (a stop-loss sell is always a loss by definition; check
 take-profit/`exit_existing` case by case against the fill), check the
-same `wash_sale_avoidance.linked_accounts` for a purchase of that symbol
+this account's `get_account_activities` (FILL type) for a purchase of that symbol
 within `lookback_window_days` days before today.
 
 A qualifying purchase alone is not enough to flag — the wash-sale rule
@@ -270,17 +266,17 @@ disallows the loss by rolling it into the cost basis of stock you still
 hold, so if nothing of that symbol remains held anywhere after this
 sale, there is no replacement position for a disallowed loss to attach
 to and it is not a wash sale, whatever the calendar gap. Concretely: a
-single purchase fully closed out by this same sale (that account's
+single purchase fully closed out by this same sale (this account's
 position in the symbol is now zero, and no other linked account holds
 or separately purchased the symbol within the window) is an ordinary
 closed round-trip, not a wash sale — do not flag it. Before adding the
-flag, call `get_equity_positions` for every account in
-`wash_sale_avoidance.linked_accounts` and confirm at least one of them
-still holds a nonzero quantity of the symbol after this sale, sourced
-from a purchase inside the lookback window (i.e. a genuine surviving
-replacement lot, not the shares this sale just closed out). Only then
-add
-`"wash_sale_flag": true, "wash_sale_note": "possible wash sale -- <symbol> was bought in account <account_number> on <date>, within <lookback_window_days> days of this sale, and a replacement position remains held in account <holding_account_number> -- this loss may be disallowed (or, if <holding_account_number> is an IRA, permanently disallowed) for tax purposes"`
+flag, call `get_open_position` for this symbol to check whether a
+nonzero quantity remains held after this sale (for linked accounts in
+`wash_sale_avoidance.linked_account_ids`, this pipeline cannot check
+positions directly — the human is responsible for cross-account
+awareness). If the position is still open after this sale (i.e. a
+genuine surviving replacement lot), add
+`"wash_sale_flag": true, "wash_sale_note": "possible wash sale -- <symbol> was bought on <date>, within <lookback_window_days> days of this sale, and a replacement position remains held -- this loss may be disallowed for tax purposes"`
 to that sell's `order` log entry. Purely informational for the human's
 own tax reconciliation — it never blocks, delays, or resizes the sell
 itself, and it does not require `wash_sale_avoidance.enabled` to be
@@ -291,11 +287,11 @@ still become a wash sale later if a linked account buys the same symbol
 afterward — that's outside this pipeline's visibility and control.
 
 **Re-pull fresh account state (now reflects this cycle's executed
-sells, not an estimate):** call `get_portfolio` (for `total_value` and
-`cash`) and `get_equity_positions` (for the live open position count)
-again — the earlier pull is now stale for any sell that actually
-executed above. Use these fresh values for Step 7's capacity
-computation, loss-limit check, and candidate sizing below. In
+sells, not an estimate):** call `get_account_info` (for
+`portfolio_value` and `cash`) and `get_all_positions` (for the live
+open position count) again — the earlier pull is now stale for any
+sell that actually executed above. Use these fresh values for Step 7's
+capacity computation, loss-limit check, and candidate sizing below. In
 `dry_run` mode these won't have changed (nothing real executed),
 which is expected — this pull only matters once `execution.mode` is
 `"live"`.
@@ -304,7 +300,7 @@ which is expected — this pull only matters once `execution.mode` is
 
 **Compute capacity (using Step 6's fresh re-pulled account state, not
 an estimate):** `open_slots = max_concurrent_positions - (live
-positions per the re-pulled get_equity_positions above)`. Only
+positions per the re-pulled get_all_positions above)`. Only
 **new**-group candidates (Step 4's classification) consume a slot;
 fixed for the rest of this cycle unless one gets approved below.
 
@@ -363,29 +359,29 @@ every independent, per-symbol condition that can block this candidate;
 list is a separate, later check further down in this same step, since
 it depends on other candidates, not just this one.
 
-Pull a fresh quote (`get_equity_quotes`) — re-verify against this
+Pull a fresh quote (`get_stock_latest_quote`) — re-verify against this
 morning's open, not Phase A's prior-close price.
 
 **Gather inputs, then let the script decide — do not hand-compute any
 gap, average, or lock condition:**
-- `--fresh-ask`: this morning's fresh `ask`.
+- `--fresh-ask`: this morning's fresh `ask_price`.
 - `--thesis-price`: Phase A's thesis-time `current_price`.
 - `--daily-closes`: the last `entry_extension.lookback_trading_days`
-  trading days of daily closes via `get_equity_historicals`
-  (interval=day, split-adjusted; request ~30 calendar days back to
-  cover weekends/holidays, drop any `interpolated: true` bars).
+  trading days of daily closes via `get_stock_bars`
+  (`timeframe: "1Day"`, `adjustment: "split"`, `days: 30` to cover
+  weekends/holidays).
 - Wash-sale inputs, only if `wash_sale_avoidance.enabled` is `true`
   (pass `--wash-sale-enabled` and `--wash-sale-lookback-days
   <wash_sale_avoidance.lookback_window_days>`; omit both otherwise):
-  for every account number in `wash_sale_avoidance.linked_accounts`,
-  call `get_pnl_trade_history` filtered to this symbol and collect the
-  dates of any closing trade realizing a negative gain, as
+  call `get_account_activities` with `activity_types: ["FILL"]` filtered
+  to this symbol's recent trades and collect the dates of any closing
+  trade realizing a negative gain, as
   `--loss-sale-dates <comma-separated ISO dates>` (omit if none
   found). Also pass `--today <today's date, ISO>`.
 - Sell re-entry lock inputs, only if `trade_log.jsonl` has this
   symbol's most recent sell `order` entry (`stop_loss`, `take_profit`,
   `conviction_trim`, or `exit_existing`) and it actually executed —
-  confirm via `get_equity_positions` that quantity is genuinely lower
+  confirm via `get_open_position` that quantity is genuinely lower
   than immediately before that logged sell, or the position was fully
   closed and re-opened since. A `dry_run` sell never actually reduces
   the position, so if quantity is unchanged there was no real
@@ -454,13 +450,15 @@ you found>", "sources": ["Outlet Name: https://..."]`, same as the
 weekend-gap check above.
 
 **Loss-limit halt check (always runs, gates all new entries and top-ups):**
-Call `get_realized_pnl` span=day and span=week (asset_classes=[equity])
-for today's and this week's realized `total_returns` in dollars (0 if no
-trades). Do **not** hand-compute the percentages — run
+Call `get_account_activities` with `activity_types: ["FILL"]` for today
+(`date` = today) and this week (`after` = Monday's date) to compute
+today's and this week's realized P&L in dollars from fill entries (sum
+of `(price - cost_basis) * qty` for closed trades; 0 if no trades). Do
+**not** hand-compute the percentages — run
 `python3 scripts/pnl_pct.py --daily-realized-usd <day total_returns> --weekly-realized-usd <week total_returns> --starting-capital-usd <risk_rules.json starting_capital_usd> --daily-limit-pct <loss_limits.daily_loss_limit_pct_of_account> --weekly-limit-pct <loss_limits.weekly_loss_limit_pct_of_account>`
 and use its JSON output (`daily_pnl_pct`, `weekly_pnl_pct`,
 `entries_halted`, `halt_reason`) directly. **If the script fails to run
-or `get_realized_pnl` can't be determined cleanly, fail safe: treat as
+or realized P&L can't be determined cleanly, fail safe: treat as
 breached** (`entries_halted = true`) rather than falling back to manual
 computation. Halts both new entries and top-ups (a top-up still spends
 cash/exposure, even though it skips the concurrency check).
@@ -480,9 +478,9 @@ disclosed none — an omitted key and an empty array mean different
 things to the ranking script below), `pct_below_52wk_high` (omit if
 not available), `group` (`"new"` or `"held"`), and — for **held**
 candidates only — `current_position_value` (quantity from the fresh
-re-pulled `get_equity_positions` above × fresh price from
-`get_equity_quotes`). Also use the re-pulled `total_value` and `cash`
-from `get_portfolio` above (`cash` is the starting `cash_remaining`),
+re-pulled `get_all_positions` above × fresh price from
+`get_stock_latest_quote`). Also use the re-pulled `portfolio_value` and `cash`
+from `get_account_info` above (`cash` is the starting `cash_remaining`),
 and `concurrent_positions_start` (the `open_slots` computation above).
 
 Rank the candidates, then size them — pipe the candidate list (a JSON
@@ -542,7 +540,7 @@ key) and, for `direction: "long"`, `risk_flags` and `pct_below_52wk_high`
 **Execute approved buys:** for every candidate Step 7's sizing
 approved (new entries and top-ups), in ranked order, run the exact
 same review → live-order-gate → place → confirm procedure as Step 6's
-"Execute sells now" (`review_equity_order` first, the same Live-order
+"Execute sells now" (validate parameters first, the same Live-order
 gate conditions, the same fill-confirmation and logging shape) — with
 one difference: the pre-trade estimate logged alongside each order is
 `quote_ask`/`quantity` here (a buy fills near the ask), not the
@@ -595,7 +593,7 @@ ever disagree, trust `trade_log.jsonl`.
 ## Hard rules
 
 - Never change `execution.mode` or any `risk_rules.json` value.
-- Never call `place_equity_order` unless the live-order gate (Step 6 for
+- Never call `place_stock_order` unless the live-order gate (Step 6 for
   sells, Step 8 for buys — same conditions) is open at that moment.
 - A "high conviction" thesis never overrides a failed mechanical check.
 - If required data can't be retrieved (portfolio, positions, P&L history),
